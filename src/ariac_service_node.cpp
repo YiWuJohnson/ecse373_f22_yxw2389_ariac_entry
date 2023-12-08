@@ -3,10 +3,19 @@
 #include "std_srvs/Trigger.h"
 #include "std_srvs/SetBool.h"
 #include <sstream>
-// Transformation header files
-#include "tf2_ros/tranform_listener.h"
+#include "tf2_ros/transform_listener.h"
 #include "tf2_geometry_msgs/tf2_geometry_msgs.h"
+#include "geometry_msgs/Pose.h"
 #include "geometry_msgs/TransformStamped.h"
+#include "osrf_gear/GetMaterialLocations.h"
+#include "osrf_gear/Order.h"
+#include "osrf_gear/Shipment.h"
+#include "osrf_gear/Product.h"
+#include "osrf_gear/LogicalCameraImage.h"
+#include "sensor_msgs/JointState.h"
+#include "ik_service/PoseIK.h"
+#include "trajectory_msgs/JointTrajectory.h"
+
 
 // Declaring a vector of data type.
 std::vector<osrf_gear::Order> order_vector;
@@ -14,11 +23,14 @@ std::vector<osrf_gear::Order> order_vector;
 //LogicalCameraImage temp information
 osrf_gear::LogicalCameraImage camInfo [10];
 
-void orderCallback(const osrf_gear::Order::ConstPtr& msg)
+//Current joint information for arm1
+sensor_msgs::JointState joint_current;
+
+void ordercallback(const osrf_gear::Order::ConstPtr& msg)
 {
   // Add information to the end of the vector
   order_vector.push_back(*msg);
-  ROS_INFO("%s order received", msg.order_id.c_str());
+  ROS_INFO("%s order received",order_vector.back().order_id.c_str());
 }
 
 
@@ -53,9 +65,19 @@ void cam_fau2_callback(const osrf_gear::LogicalCameraImage::ConstPtr & cam_msg) 
   camInfo [9] = *cam_msg;
 }
 
+void joint_global_callback(const sensor_msgs::JointState::ConstPtr& msg)
+{
+  joint_current = *msg;
+}
+
 // Retrieve the transformation
 void arm_trans(std::string frame, geometry_msgs::TransformStamped tfStamped)
 { 
+  // Declare the transformation buffer to maintain a list of transformations
+  tf2_ros::Buffer tfBuffer;
+  // Instantiate a listener that listens to the tf and tf_static topics and to update the
+  tf2_ros::TransformListener tfListener(tfBuffer);
+
   try {
   tfStamped = tfBuffer.lookupTransform("arm1_base_link",frame,ros::Time(0.0), ros::Duration(1.0));
   ROS_DEBUG("Transform to [%s] from [%s]", tfStamped.header.frame_id.c_str(),
@@ -114,16 +136,12 @@ int main(int argc, char **argv)
 begin_comp.response.message.c_str());
   }
 
+  ros::Rate loop_rate(10);
 
   // Clearing/initializing vector
   order_vector.clear();
 
-  // Declare the transformation buffer to maintain a list of transformations
-  tf2_ros::Buffer tfBuffer;
-  // Instantiate a listener that listens to the tf and tf_static topics and to update the
-  buffer.tf2_ros::TransformListener tfListener(tfBuffer);
-
-  ros::Subscriber oder_sub = n.subscribe<osrf_gear::Order>("/ariac/orders", 1000, orderserviceCallback); 
+  ros::Subscriber order_sub = n.subscribe<osrf_gear::Order>("/ariac/orders", 1000, ordercallback); 
 
   ros::Subscriber cam_agv1_sub = n.subscribe("/ariac/logical_camera_agv1", 1000, cam_agv1_callback);
   ros::Subscriber cam_agv2_sub = n.subscribe("/ariac/logical_camera_agv2", 1000, cam_agv2_callback);
@@ -135,76 +153,105 @@ begin_comp.response.message.c_str());
   ros::Subscriber cam_bin5_sub = n.subscribe("/ariac/logical_camera_bin5", 1000, cam_bin5_callback);
   ros::Subscriber cam_bin6_sub = n.subscribe("/ariac/logical_camera_bin6", 1000, cam_bin6_callback);
   
-  ros::Subscriber cam_fau1_sub = n.subscribe("/ariac/quality_control_sensor_1", 1000, cam_faulty1_callback);
-  ros::Subscriber cam_fau2_sub = n.subscribe("/ariac/quality_control_sensor_2", 1000, cam_faulty2_callback);
+  ros::Subscriber cam_fau1_sub = n.subscribe("/ariac/quality_control_sensor_1", 1000, cam_fau1_callback);
+  ros::Subscriber cam_fau2_sub = n.subscribe("/ariac/quality_control_sensor_2", 1000, cam_fau2_callback);
+
+  ros::Subscriber arm1_joint = n.subscribe("/ariac/arm1/joint_states", 1000, joint_global_callback);
 
   ros::ServiceClient materialLocations =   n.serviceClient<osrf_gear::GetMaterialLocations>("/ariac/material_locations");
 
+  ros::ServiceClient ik_pose = n.serviceClient<ik_service::PoseIK>("/pose_ik_service");
+  ros::service::waitForService("/pose_ik_service", 100);
+
+  ros::AsyncSpinner spinner(1); // Use 1 thread
+  spinner.start(); // A spinner makes calling ros::spin() unnecessary.
+
   int productnum = 0;
   int shipmentnum = 0;
+
+while(ros::ok())
+{
+  
   //order process
-  if (orders.size() > 0)
+  if (order_vector.size() > 0)
 {
     
     //process one product
-    std::string type = orders_vector[0].shipments[shipmentnum].products[productnum].type;
+    std::string type = order_vector[0].shipments[shipmentnum].products[productnum].type;
 
     osrf_gear::GetMaterialLocations LocationsInfo;
     LocationsInfo.request.material_type = type;
+    std::string bins;
+    int bin;
+    std::string frame;
+    // Create variables
+    geometry_msgs::PoseStamped part_pose, goal_pose;
+
     if (materialLocations.call(LocationsInfo)) 
     {
-        std::string bins = LocationsInfo.response.storage_units[0].unit_id;
+        bins = LocationsInfo.response.storage_units[0].unit_id;
         if (bins == "bin1")
           {
-             int bin = 2;
-             std::string frame = "logical_camera_bin1_frame";
+             bin = 2;
+             frame = "logical_camera_bin1_frame";
           }
         else if (bins == "bin2")
           {
-             int bin = 3;
-             std::string frame = "logical_camera_bin2_frame";
+             bin = 3;
+             frame = "logical_camera_bin2_frame";
           }
         else if (bins == "bin3")
           {
-             int bin = 4;
-             std::string frame = "logical_camera_bin3_frame";
+             bin = 4;
+             frame = "logical_camera_bin3_frame";
           }
         else if (bins == "bin4")
           {
-             int bin = 5;
-             std::string frame = "logical_camera_bin4_frame";
+             bin = 5;
+             frame = "logical_camera_bin4_frame";
           }
         else if (bins == "bin5")
           {
-             int bin = 6;
-             std::string frame = "logical_camera_bin5_frame";
+             bin = 6;
+             frame = "logical_camera_bin5_frame";
           }
         else if (bins == "bin6")
           {
-             int bin = 7;
-             std::string frame = "logical_camera_bin6_frame";
+             bin = 7;
+             frame = "logical_camera_bin6_frame";
           }
-        osrf_gear::LogicalCameraImage camInfo = camInfo[bin]
+
+        osrf_gear::LogicalCameraImage camInfotem = camInfo [bin];
 
         geometry_msgs::TransformStamped tfStamped;
-        arm_trans(frame, tfStamped)
+        arm_trans(frame, tfStamped);
 
-        // Create variables
-        geometry_msgs::PoseStamped part_pose, goal_pose;
         // Copy pose from the logical camera.
-        part_pose.pose = camInfo.models[0].pose;
+        part_pose.pose = camInfotem.models[0].pose;
         goal_pose = Set_goal_pose();
        
         tf2::doTransform(part_pose, goal_pose, tfStamped);
     }
 
-    ROS_INFO_STREAM("Product type is" + type);
-    ROS_INFO_STREAM("Product unit is" + bins);
-    ROS_INFO_STREAM("Product unit is" + part_pose.pose);
+    ROS_INFO_STREAM("Product type is" << type);
+    ROS_INFO_STREAM("Product unit is" << bins);
+    ROS_INFO_STREAM("Product pose is" << part_pose.pose);
+
+    ik_service::PoseIK pose_ik;  
+    pose_ik.request.part_pose = goal_pose.pose;
+    // Call the Service
+    if (ik_pose.call(pose_ik))
+       {
+          ROS_INFO("Response returned %i solutions", pose_ik.response.num_sols);
+       }
+    else
+       {
+          ROS_ERROR("Failed to call service ik_service");
+       }
 
 
     // Another product
-    if (productnum + 1 < sizeof(orders[0].shipments[productnum].products))
+    if (productnum + 1 < sizeof(order_vector[0].shipments[productnum].products))
     {
         productnum ++;
     }
@@ -212,7 +259,7 @@ begin_comp.response.message.c_str());
     {
         productnum = 0;
         // Another shipment
-        if (shipmentnum + 1 < sizeof(orders[0].shipments))
+        if (shipmentnum + 1 < sizeof(order_vector[0].shipments))
         {
             shipmentnum++;
         }
@@ -220,11 +267,16 @@ begin_comp.response.message.c_str());
         {
             ROS_INFO("End of order");
             shipmentnum = 0;
-            orders.erase(orders.begin());
+            order_vector.erase(order_vector.begin());
         }
     }
 }
 
+//current joint info
+  ROS_INFO_STREAM_THROTTLE(10, "Current joint states of arm1:" << joint_current << "time = " << ros::Time::now());
+
+loop_rate.sleep();
+}
 
   return 0;
 }
