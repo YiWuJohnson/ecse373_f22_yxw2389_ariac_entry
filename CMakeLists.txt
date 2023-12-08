@@ -13,6 +13,7 @@ find_package(catkin REQUIRED COMPONENTS
   rviz
   tf2
   ik_service
+  actionlib
 )
 
 ## System dependencies are found with CMake's conventions

@@ -15,6 +15,11 @@
 #include "sensor_msgs/JointState.h"
 #include "ik_service/PoseIK.h"
 #include "trajectory_msgs/JointTrajectory.h"
+// Action Server headers
+#include "actionlib/client/simple_action_client.h"
+#include "actionlib/client/terminal_state.h"
+// The Action Server "message type"
+#include "control_msgs/FollowJointTrajectoryAction.h"
 
 
 // Declaring a vector of data type.
@@ -103,6 +108,100 @@ geometry_msgs::PoseStamped Set_goal_pose()
     return goal_pose;
 }
 
+void move_arm_to(int count, sensor_msgs::JointState joint_current, geometry_msgs::PoseStamped Pose, ros::Publisher follow_joint_trajectory)
+{
+  // Declare a variable for generating and publishing a trajectory.
+  trajectory_msgs::JointTrajectory joint_trajectory;
+  // Fill out the joint trajectory header.
+  // Each joint trajectory should have an non-monotonically increasing sequence number.
+  joint_trajectory.header.seq = count++;
+  joint_trajectory.header.stamp = ros::Time::now(); 
+  joint_trajectory.header.frame_id = "/world"; // Frame in which this is specified.
+  // Set the names of the joints being used. All must be present.
+  joint_trajectory.joint_names.clear();
+  joint_trajectory.joint_names.push_back("linear_arm_actuator_joint");
+  joint_trajectory.joint_names.push_back("shoulder_pan_joint");
+  joint_trajectory.joint_names.push_back("shoulder_lift_joint");
+  joint_trajectory.joint_names.push_back("elbow_joint");
+  joint_trajectory.joint_names.push_back("wrist_1_joint");
+  joint_trajectory.joint_names.push_back("wrist_2_joint");
+  joint_trajectory.joint_names.push_back("wrist_3_joint");
+  // Set a start and end point.
+  joint_trajectory.points.resize(2);
+  // Set the start point to the current position of the joints from joint_states.
+joint_trajectory.points[0].positions.resize(joint_trajectory.joint_names.size());
+  for (int indy = 0; indy < joint_trajectory.joint_names.size(); indy++) 
+  {
+   for (int indz = 0; indz < joint_current.name.size(); indz++) 
+   {
+     if (joint_trajectory.joint_names[indy] == joint_current.name[indz]) 
+       {
+           joint_trajectory.points[0].positions[indy] = joint_current.position[indz];
+            break;
+       }
+     }
+  }
+  // When to start (immediately upon receipt).
+  joint_trajectory.points[0].time_from_start = ros::Duration(0.0);
+  // Must select which of the num_sols solutions to use. Just start with the first.
+  int q_des_indx = 0;
+  // Set the end point for the movement
+joint_trajectory.points[1].positions.resize(joint_trajectory.joint_names.size());
+  // Set the linear_arm_actuator_joint from joint_states as it is not part of the inverse kinematics solution.
+joint_trajectory.points[1].positions[0] = joint_current.position[1];
+  // The actuators are commanded in an odd order, enter the joint positions in the correct positions
+  for (int indy = 0; indy < 6; indy++) 
+  {
+    joint_trajectory.points[1].positions[indy + 1] = Pose.pose.position[indy];
+  }
+  // How long to take for the movement.
+  joint_trajectory.points[1].time_from_start = ros::Duration(1.0);
+  follow_joint_trajectory.publish(joint_trajectory);
+}
+
+
+//void end_effector(double T_pose, double q_pose, sensor_msgs::JointState joint_current)
+//{
+  // Where is the end effector given the joint angles.
+  // joint_states.position[0] is the linear_arm_actuator_joint
+  //q_pose[0] = joint_current.position[1];
+  //q_pose[1] = joint_current.position[2];
+  //q_pose[2] = joint_current.position[3];
+  //q_pose[3] = joint_current.position[4];
+  //q_pose[4] = joint_current.position[5];
+  //q_pose[5] = joint_current.position[6];
+  //ur_kinematics::forward((float *)&q_pose, (double *)&T_pose);
+//}
+
+//void joint_angles(double T_des, double q_des, trajectory_msgs::JointTrajectory desired)
+//{
+  // What joint angles put the end effector at a specific place.
+  // Desired pose of the end effector wrt the base_link.
+  //T_des[0][3] = desired.pose.position.x;
+  //T_des[1][3] = desired.pose.position.y;
+  //T_des[2][3] = desired.pose.position.z + 0.3; // above part
+  //T_des[3][3] = 1.0;
+  // The orientation of the end effector so that the end effector is down.
+  //T_des[0][0] = 0.0; T_des[0][1] = -1.0; T_des[0][2] = 0.0;
+  //T_des[1][0] = 0.0; T_des[1][1] = 0.0; T_des[1][2] = 1.0;
+  //T_des[2][0] = -1.0; T_des[2][1] = 0.0; T_des[2][2] = 0.0;
+  //T_des[3][0] = 0.0; T_des[3][1] = 0.0; T_des[3][2] = 0.0;
+  //int num_sols = ur_kinematics::inverse((double *)&T_des, (double *)&q_des);
+//}
+
+// This callback is called when a goal becomes active.
+//void goalActiveCallback() {
+
+//}
+// This callback is called when feedback is provided
+//void feedbackCallback(const control_msgs::JointTrajectoryFeedbackConstPtr& fb) {
+
+//}
+// This callback is called when the action is complete and provides the result
+//void resultCallback(const control_msgs::JointTrajectoryResultConstPtr& res) {
+
+//}
+
 
 int main(int argc, char **argv)
 {
@@ -156,18 +255,30 @@ begin_comp.response.message.c_str());
   ros::Subscriber cam_fau1_sub = n.subscribe("/ariac/quality_control_sensor_1", 1000, cam_fau1_callback);
   ros::Subscriber cam_fau2_sub = n.subscribe("/ariac/quality_control_sensor_2", 1000, cam_fau2_callback);
 
-  ros::Subscriber arm1_joint = n.subscribe("/ariac/arm1/joint_states", 1000, joint_global_callback);
+  ros::Subscriber arm1_joint = n.subscribe("/ariac/arm1/joint_states", 10, joint_global_callback);
 
   ros::ServiceClient materialLocations =   n.serviceClient<osrf_gear::GetMaterialLocations>("/ariac/material_locations");
 
   ros::ServiceClient ik_pose = n.serviceClient<ik_service::PoseIK>("/pose_ik_service");
   ros::service::waitForService("/pose_ik_service", 100);
 
+  ros::Publisher follow_joint_trajectory = n.advertise<trajectory_msgs::JointTrajectory>("ariac/arm1/arm/command", 1000);
+  
+  // Instantiate the Action Server client
+  actionlib::SimpleActionClient<control_msgs::FollowJointTrajectoryAction> \
+trajectory_ac("ariac/arm/follow_joint_trajectory", true);
+
   ros::AsyncSpinner spinner(1); // Use 1 thread
   spinner.start(); // A spinner makes calling ros::spin() unnecessary.
 
   int productnum = 0;
   int shipmentnum = 0;
+  int count = 0;
+
+  // Instantiate variables for use with the kinematic system.
+  double T_pose[4][4], T_des[4][4];
+  double q_pose[6], q_des[8][6];
+  trajectory_msgs::JointTrajectory desired;
 
 while(ros::ok())
 {
@@ -243,6 +354,7 @@ while(ros::ok())
     if (ik_pose.call(pose_ik))
        {
           ROS_INFO("Response returned %i solutions", pose_ik.response.num_sols);
+          move_arm_to(count, joint_current, pose_ik.response, follow_joint_trajectory);
        }
     else
        {
